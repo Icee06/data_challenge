@@ -12,13 +12,16 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+import scoring_engine as se
 
 load_dotenv()
 
@@ -205,13 +208,32 @@ async def get_dialogue(conversation_id: str, group_id: str = "DEV"):
 
 
 # --------------------------------------------------------------------------- #
+# Scoring (pure math: no LLM involved). Used by the UI for checklist defaults
+# and for instant recalculation after an appeal decision.
+# --------------------------------------------------------------------------- #
+class ScoreRequest(BaseModel):
+    checklist: Optional[se.Checklist] = None  # omit -> default checklist
+    answers: List[se.Answer]
+    overrides: List[se.Override] = []  # reviewer decisions
+
+
+@app.get("/api/checklist/default")
+async def get_default_checklist():
+    return se.default_checklist()
+
+
+@app.post("/api/score")
+async def score_answers(req: ScoreRequest):
+    """Returns {original, final, total_delta, changed}. Without overrides, final == original."""
+    try:
+        return se.score_with_overrides(req.checklist or se.default_checklist(), req.answers, req.overrides)
+    except se.ScoringError as exc:
+        raise HTTPException(422, {"problems": exc.problems})
+
+
+# --------------------------------------------------------------------------- #
 # Frontend (optional): serve ../frontend_ZAKO from the same origin, so the demo
 # runs with a single command and needs no CORS at all. Keep this block LAST.
 # --------------------------------------------------------------------------- #
 if FRONTEND_DIR.is_dir():
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
-async def get_dialogue(dialogue_id: str):
-    """Get single dialogue details and transcript."""
-    if dialogue_id not in dialogues_db:
-        raise HTTPException(status_code=404, detail="Dialogue not found")
-    return dialogues_db[dialogue_id]
