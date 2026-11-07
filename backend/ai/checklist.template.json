@@ -1,0 +1,16 @@
+{
+  "_note": "PLACEHOLDERS. Replace with the official 8 criteria, weights, scales and N/A conditions.",
+  "criteria": [
+    {"id": "01", "name": "Greeting", "description": "Operator greets and introduces themselves.", "weight": 10, "type": "binary", "na_condition": null},
+    {"id": "02", "name": "Needs identification", "description": "Operator asks clarifying questions to understand the client's need before offering anything.", "weight": 15, "type": "binary", "na_condition": null},
+    {"id": "03", "name": "Product presentation", "description": "Operator presents a suitable product with its key terms.", "weight": 15, "type": "binary", "na_condition": "Client did not need any product information."},
+    {"id": "04", "name": "Communication quality", "description": "Polite, clear, confident speech.", "weight": 15, "type": "scale", "scale": [0, 7.5, 15], "na_condition": null},
+    {"id": "05", "name": "Objection handling", "description": "Operator answers client objections with arguments.", "weight": 15, "type": "binary", "na_condition": "Client raised no objections."},
+    {"id": "06", "name": "Compliance and risk disclosure", "description": "Operator mentions risks and does not promise returns.", "weight": 10, "type": "scale", "scale": [0, 5, 10], "na_condition": "No investment product was discussed."},
+    {"id": "07", "name": "Next step agreed", "description": "Operator agrees a concrete next step with the client.", "weight": 10, "type": "binary", "na_condition": null},
+    {"id": "08", "name": "Farewell", "description": "Operator thanks the client and closes the conversation politely.", "weight": 10, "type": "binary", "na_condition": null}
+  ],
+  "critical_error": {
+    "description": "Rudeness, deliberate misinformation, guaranteeing returns, or disclosing confidential data."
+  }
+}
