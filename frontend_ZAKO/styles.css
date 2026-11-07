@@ -1,0 +1,12 @@
+.modal { position: fixed; inset: 0; background: rgba(2, 6, 23, .8); display: flex; align-items: center; justify-content: center; padding: 1rem; z-index: 50; }
+.modal.hidden { display: none; }
+.modal-box { background: #1e293b; border: 1px solid #334155; border-radius: .5rem; width: 100%; padding: 1.5rem; }
+.modal-box input, .modal-box select, .modal-box textarea { background: #334155; border: 1px solid #475569; border-radius: .25rem; padding: .35rem .5rem; font-size: .75rem; color: #f1f5f9; width: 100%; }
+.msg-hit { outline: 1px dashed rgba(16, 185, 129, .6); outline-offset: 1px; }
+.highlight-quote {
+  animation: pulse-border 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  background-color: rgba(16, 185, 129, 0.15) !important;
+  border-left: 4px solid #10b981 !important;
+}
+@keyframes pulse-border { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+@media (prefers-reduced-motion: reduce) { .highlight-quote { animation: none; } }
