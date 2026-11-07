@@ -1,0 +1,40 @@
+{
+  "version": "official-1",
+  "criteria": [
+    {"id": "01", "name": "Установление контакта", "weight": 10, "type": "binary", "na_condition": null,
+     "description": "PASS: the operator greeted the client in the client's language AND introduced themselves, both in the operator's FIRST reply. Otherwise FAIL."},
+    {"id": "02", "name": "Выявление потребности", "weight": 15, "type": "binary",
+     "na_condition": "The data in the client's messages was enough to answer from the very start, so no clarification was needed.",
+     "description": "PASS: the operator used the details already known and asked for the missing ones BEFORE answering. FAIL: clarification was needed and the operator skipped it or answered without it."},
+    {"id": "03", "name": "Идентификация", "weight": 20, "type": "binary",
+     "na_condition": "The request did not require identification (e.g. a general question about tariffs).",
+     "description": "PASS: identity verification is confirmed in the chat BEFORE personal data is disclosed or a protected action is performed. FAIL: verification was required but is not confirmed in the chat."},
+    {"id": "04", "name": "Корректная и полная консультация", "weight": 20, "type": "scale",
+     "scale": [0, 5, 10, 15, 20],
+     "scale_steps": {
+       "20": "All essential questions are closed or a correct next step is given.",
+       "15": "The main question is solved, a minor detail is missed.",
+       "10": "Part of the request is closed, an essential question remains open.",
+       "5": "There is a general hint, but the client still does not understand how to act.",
+       "0": "No substantive answer, or the key recommendation is wrong."},
+     "na_condition": "The chat ended before the client formulated a request.",
+     "description": "Rate the correctness and completeness of the answer or next step."},
+    {"id": "05", "name": "Эмпатия и клиентоориентированность", "weight": 15, "type": "binary", "na_condition": null,
+     "description": "PASS: the operator is polite AND, if the client expressed dissatisfaction or described an inconvenience, reacted to that specific problem. If the client showed neither, politeness alone is enough. FAIL otherwise."},
+    {"id": "06", "name": "Управление диалогом, скорость и грамотность", "weight": 15, "type": "scale",
+     "scale": [0, 4, 7, 10],
+     "scale_steps": {
+       "10": "Replies are clear and coherent. If there was an explicit wait, the operator warned about it.",
+       "7": "One noticeable lapse, but the client can understand the answer and continue.",
+       "4": "The client has to ask again because of wording or the order of answers.",
+       "0": "Incoherent or contradictory replies make the flow of the dialogue unclear."},
+     "na_condition": null,
+     "description": "Rate clarity, order of replies and warning about waiting. This is about HOW the operator communicated, not whether the request was solved correctly (that is criterion 04). The first-reaction 3-minute threshold, tags and attachments are NOT part of the assessment."},
+    {"id": "07", "name": "Завершение", "weight": 5, "type": "binary",
+     "na_condition": "The chat broke off before the operator had a chance to close it.",
+     "description": "PASS: the operator summed up or offered further help AND said goodbye. FAIL: the operator closed the chat without them."}
+  ],
+  "critical_error": {
+    "description": "Criterion 08, gross violations, flagged separately and worth no points. Set critical_error true ONLY if the OPERATOR (not the bot) did at least one of: (1) insulted the client; (2) offered a paid service bypassing the company, e.g. proposed that the client transfer money to the operator personally to invest, or asked for the client's personal number to give a paid private consultation (the offer alone is enough, client consent or a transfer is not required); (3) disclosed confidential information. Quote the exact message(s) in critical_error_evidence. If none of the three is found, critical_error is false and the list is empty."
+  }
+}

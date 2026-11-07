@@ -1,0 +1,79 @@
+{
+  "answers": [
+    {
+      "criterion_id": "contact",
+      "answer": "yes",
+      "explanation": "Оператор поздоровался на языке клиента и представился в первом ответе.",
+      "evidence": [
+        {
+          "message_index": 0,
+          "timestamp": "00:02",
+          "speaker": "operator",
+          "quote": "Здравствуйте! Меня зовут Айгерим, чем могу помочь?"
+        }
+      ]
+    },
+    {
+      "criterion_id": "needs",
+      "answer": "na",
+      "explanation": "Клиент сразу назвал тариф и вопрос, уточнений не требовалось.",
+      "checked_range": "00:05–01:10"
+    },
+    {
+      "criterion_id": "identification",
+      "answer": "na",
+      "explanation": "Общий вопрос о тарифах, защищённых данных не раскрывалось.",
+      "checked_range": "весь чат"
+    },
+    {
+      "criterion_id": "consultation",
+      "answer": 15,
+      "explanation": "Основной вопрос решён, но не названа комиссия за вывод средств.",
+      "evidence": [
+        {
+          "message_index": 5,
+          "timestamp": "01:20",
+          "speaker": "operator",
+          "quote": "Тариф Premium стоит 5 000 тг в месяц."
+        }
+      ]
+    },
+    {
+      "criterion_id": "empathy",
+      "answer": "yes",
+      "explanation": "Вежливый тон на протяжении всего чата."
+    },
+    {
+      "criterion_id": "dialogue",
+      "answer": 7,
+      "explanation": "Одна длинная пауза без предупреждения об ожидании.",
+      "evidence": [
+        {
+          "message_index": 7,
+          "timestamp": "03:40",
+          "speaker": "operator",
+          "quote": "Спасибо за ожидание."
+        }
+      ]
+    },
+    {
+      "criterion_id": "closing",
+      "answer": "no",
+      "explanation": "Оператор закрыл чат сразу после ответа, без прощания.",
+      "checked_range": "последние 2 реплики"
+    },
+    {
+      "criterion_id": "gross_errors",
+      "answer": "no",
+      "explanation": "Оскорблений, предложений в обход компании и раскрытия конфиденциальных данных не найдено."
+    }
+  ],
+  "overrides": [
+    {
+      "criterion_id": "closing",
+      "answer": "yes",
+      "reviewer": "QA-1",
+      "reason": "В последней реплике оператор предложил дальнейшую помощь и попрощался."
+    }
+  ]
+}
