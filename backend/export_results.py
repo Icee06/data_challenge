@@ -1,272 +1,294 @@
-"""Export results in the organizers' format (Student Guide appendix, "Результаты оценки, формат JSON 1.0").
+#!/usr/bin/env python3
+"""Export evaluations to results/<dev|prod>/results.json  (appendix "Как сдать результаты", JSON 1.0).
 
-Run from backend/ (the server does not need to be running):
+It reads everything from the RUNNING backend, so evaluate first (UI or /docs), then run from backend/:
 
-  python export_results.py --set dev                                   # DEV  -> ../results/dev/results.json
-  python export_results.py --set prod --group <control group_id> --evaluate-missing
-  python export_results.py --check ../results/prod/results.json --expect 10
+    python export_results.py FBroker --folder prod --team-name "Team"
+    python export_results.py DEV --team-name "Team"
 
-What it does
-  * Takes every dialogue of the dataset (same loading as the API: cache file first, then the organizer API).
-  * For each one it reads the latest saved evaluation under the active checklist, the same result the UI shows,
-    reviewer decisions included (use --ai-only to export the AI answers without them).
-  * --evaluate-missing first evaluates dialogues that have no saved result (one AI call each, one at a time).
-  * A dialogue without a result is written as status "error" with the reason. It is never replaced by a zero score.
-  * Before writing, the file is checked against the appendix rules; problems are printed and the exit code is 1.
-
-Format rules implemented (appendix pages 2-3)
-  criterion codes  contact, discovery, identification, consultation, empathy, dialogue, closure, critical
-  value            true = "Да", false = "Нет", null = N/A, a number = scale step before weighting
-  evidence_turns   numbers of the supporting messages, counted from 1 over the original transcript
-                   (the app counts from #0, so message #7 in the app is 8 here)
-  final_score      0-100, two decimals, N/A weight redistributed; critical_flag equals the value of "critical"
+The file is validated against the appendix rules BEFORE it is written; if anything is wrong nothing is
+written and the problems are printed. Dialogues without a saved evaluation are exported as
+status="error" (never hidden, never a fake zero), as the appendix requires.
 """
 import argparse
-import asyncio
 import json
 import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-ROOT = Path(__file__).resolve().parent.parent
+import httpx
 
-# backend criterion id -> code required by the organizers
-CODES = {"contact": "contact", "needs": "discovery", "identification": "identification",
-         "consultation": "consultation", "empathy": "empathy", "dialogue": "dialogue",
-         "closing": "closure", "gross_errors": "critical"}
-REQUIRED = ["contact", "discovery", "identification", "consultation", "empathy", "dialogue", "closure", "critical"]
-BOOL = {"contact", "empathy", "critical"}                     # true / false
-BOOL_OR_NA = {"discovery", "identification", "closure"}       # true / false / null
-SCALE = {"consultation": {0, 5, 10, 15, 20}, "dialogue": {0, 4, 7, 10}}
-SCALE_NA = {"consultation"}                                   # dialogue has no N/A
-
-
-# --------------------------------------------------------------------------- building
-def _num(x: Any) -> Any:
-    return int(x) if isinstance(x, float) and x.is_integer() else x
-
-
-def criterion_entry(c: Dict[str, Any], ai_only: bool) -> Dict[str, Any]:
-    """One criterion of the evaluation card (evaluation_service.build_view) -> organizer format."""
-    answer = c["original_answer"] if (ai_only and c.get("source") == "reviewer") else c["answer"]
-    if isinstance(answer, str):
-        answer = answer.strip().lower()
-    if c["type"] == "flag":
-        value: Any = answer == "yes"
-    elif answer == "na":
-        value = None
-    elif c["type"] == "scale":
-        value = _num(answer)
-    else:
-        value = answer == "yes"
-    turns = sorted({e["message_index"] + 1 for e in c.get("evidence") or [] if e.get("message_index") is not None})
-    rationale = (c.get("explanation") or "").strip()
-    if not rationale and c.get("checked_range"):
-        rationale = f"Проверено: {c['checked_range']}"
-    return {"criterion_id": CODES.get(c["id"], c["id"]), "value": value, "rationale": rationale, "evidence_turns": turns}
+CODES = ["contact", "discovery", "identification", "consultation", "empathy", "dialogue", "closure", "critical"]
+# backend criterion id -> code required by the results format
+ID_TO_CODE = {
+    "contact": "contact", "needs": "discovery", "discovery": "discovery", "identification": "identification",
+    "consultation": "consultation", "empathy": "empathy", "dialogue": "dialogue",
+    "closing": "closure", "closure": "closure", "gross_errors": "critical", "critical": "critical",
+}
+BOOL_CODES = {"contact", "discovery", "identification", "empathy", "closure", "critical"}
+NULLABLE = {"discovery", "identification", "consultation", "closure"}
+SCALE_VALUES = {"consultation": {0, 5, 10, 15, 20}, "dialogue": {0, 4, 7, 10}}
+LOCAL_PROVIDERS = {"ollama", "local", "lmstudio", "llamacpp", "llama.cpp", "vllm", "llamafile"}
+REPO_ROOT = Path(__file__).resolve().parent.parent
+NOT_EVALUATED = "Диалог не оценён: сохранённого результата нет (оценка не выполнялась или завершилась ошибкой)."
 
 
-def result_entry(cid: str, view: Dict[str, Any], ai_only: bool) -> Dict[str, Any]:
-    criteria = [criterion_entry(c, ai_only) for c in view["criteria"]]
-    critical = next((x["value"] for x in criteria if x["criterion_id"] == "critical"), bool(view.get("critical_error")))
-    total = view["original_total"] if ai_only else view["total"]
-    return {"conversation_id": cid, "status": "ok", "criteria": criteria,
-            "score": {"final_score": None if total is None else round(float(total), 2), "critical_flag": bool(critical)}}
+class ExportError(Exception):
+    pass
 
 
-def error_entry(cid: str, reason: str) -> Dict[str, Any]:
-    return {"conversation_id": cid, "status": "error", "criteria": [], "score": None, "error": reason}
+# ----------------------------------------------------------------- conversion
+def to_value(code: str, c: Dict[str, Any]) -> Any:
+    ans = c.get("answer")
+    if ans == "na":
+        return None
+    if ans == "yes":
+        return True  # for "critical" this means: a violation was found
+    if ans == "no":
+        return False
+    if isinstance(ans, (int, float)) and not isinstance(ans, bool):
+        return int(ans) if float(ans).is_integer() else ans
+    raise ExportError(f"criterion '{c.get('id')}': cannot convert answer {ans!r}")
 
 
-def _mode_from_env() -> str:
-    base = os.getenv("LLM_BASE_URL", "")
-    return "local" if any(h in base for h in ("localhost", "127.0.0.1")) else "external_api"
+def turns_for(c: Dict[str, Any], transcript: List[Dict[str, Any]]) -> List[int]:
+    """1-based turn numbers over the ORIGINAL transcript array. With no quoted evidence (skipped action,
+    N/A, no violation) we list the operator turns that were checked, like the appendix example does."""
+    n = len(transcript)
+    turns = sorted({e["message_index"] + 1 for e in (c.get("evidence") or [])
+                    if isinstance(e.get("message_index"), int) and 0 <= e["message_index"] < n})
+    if turns:
+        return turns
+    ops = [i + 1 for i, m in enumerate(transcript) if m.get("speaker") == "operator"]
+    return ops or list(range(1, n + 1))
 
 
-async def build(group: str, team: str, mode: Optional[str] = None, version: Optional[int] = None,
-                ai_only: bool = False, evaluate_missing: bool = False, log=print) -> Tuple[Dict[str, Any], Dict[str, int]]:
-    import main  # loads .env, the dataset store and the services
-    import evaluation_service as ev
-    from schemas import ServiceError
+def rationale_for(c: Dict[str, Any]) -> str:
+    text = (c.get("explanation") or "").strip()
+    if text:
+        return text
+    if c.get("checked_range"):
+        return f"Проверен участок: {c['checked_range']}."
+    return "Пояснение не указано."
 
-    await main.ensure_loaded(group)
-    records = list(main._store[group].values())
-    results, failures, models = [], {}, []
-    lengths = {str(r["conversation_id"]): len(r.get("transcript") or []) for r in records}
 
-    for n, rec in enumerate(records, 1):
-        cid = str(rec["conversation_id"])
-        view = None
-        try:
-            view = ev.get_latest_view(group, cid, version)
-        except ServiceError as e:
-            if e.status_code != 404:
-                failures[cid] = e.message
-        if view is None and evaluate_missing and cid not in failures:
-            try:
-                view = await ev.evaluate(group, rec, version)
-                log(f"[{n}/{len(records)}] evaluated {cid}: {view['total']}")
-            except ServiceError as e:
-                failures[cid] = e.message + (f" ({'; '.join(e.problems)})" if e.problems else "")
-            except Exception as e:  # network, quota ...
-                failures[cid] = f"{type(e).__name__}: {e}"
-            if cid in failures:
-                log(f"[{n}/{len(records)}] FAILED {cid}: {failures[cid]}")
-        if view is None:
-            results.append(error_entry(cid, failures.get(cid) or "Оценка не получена: нет сохранённого результата для активного чек-листа."))
+def error_record(conversation_id: str, message: str) -> Dict[str, Any]:
+    return {"conversation_id": conversation_id, "status": "error", "criteria": [], "score": None, "error": message}
+
+
+def build_record(view: Dict[str, Any], transcript: List[Dict[str, Any]]) -> Dict[str, Any]:
+    by_code: Dict[str, Dict[str, Any]] = {}
+    for c in view["criteria"]:
+        code = ID_TO_CODE.get(c["id"])
+        if code is None:
+            raise ExportError(
+                f"criterion '{c['id']}' has no code in the results format. The export needs the ORIGINAL 8-criteria "
+                f"checklist: pass --checklist-version N (see GET /api/checklist/versions).")
+        if code in by_code:
+            raise ExportError(f"two criteria map to '{code}' in checklist version {view.get('checklist_version')}")
+        by_code[code] = c
+    missing = [x for x in CODES if x not in by_code]
+    if missing:
+        raise ExportError(f"checklist version {view.get('checklist_version')} lacks: {', '.join(missing)}. "
+                          f"Pass --checklist-version N of the original checklist.")
+    if view.get("total") is None:
+        return error_record(view["conversation_id"], "Итог не рассчитан: нет применимых критериев с весом.")
+
+    criteria = [{"criterion_id": code, "value": to_value(code, by_code[code]),
+                 "rationale": rationale_for(by_code[code]), "evidence_turns": turns_for(by_code[code], transcript)}
+                for code in CODES]
+    critical = criteria[-1]["value"]
+    return {"conversation_id": view["conversation_id"], "status": "ok", "criteria": criteria,
+            "score": {"final_score": round(float(view["total"]), 2), "critical_flag": bool(critical)}}
+
+
+# ------------------------------------------------------------------- fetching
+def collect(client, group_id: str, checklist_version: Optional[int] = None) -> Tuple[List[Dict[str, Any]], List[str]]:
+    r = client.get("/api/dialogues", params={"group_id": group_id})
+    r.raise_for_status()
+    ids = [d["conversation_id"] for d in r.json()["dialogues"]]
+    results, models = [], []
+    for cid in ids:
+        params: Dict[str, Any] = {"group_id": group_id}
+        if checklist_version is not None:
+            params["checklist_version"] = checklist_version
+        r = client.get(f"/api/evaluation/{cid}", params=params)
+        if r.status_code == 404:
+            results.append(error_record(cid, NOT_EVALUATED))
             continue
-        if view.get("model") and view["model"] not in models:
+        r.raise_for_status()
+        view = r.json()
+        d = client.get(f"/api/dialogues/{cid}", params={"group_id": group_id})
+        d.raise_for_status()
+        results.append(build_record(view, d.json().get("transcript") or []))
+        if view.get("model"):
             models.append(view["model"])
-        results.append(result_entry(cid, view, ai_only))
-
-    model_name = ", ".join(models) or os.getenv("LLM_MODEL", "") or "unknown"
-    doc = {"schema_version": "1.0", "team_name": team,
-           "model": {"mode": mode or _mode_from_env(), "name": model_name}, "results": results}
-    return doc, lengths
+    return results, models
 
 
-# --------------------------------------------------------------------------- checking
-def _two_decimals(x: float) -> bool:
-    return abs(round(x, 2) - x) < 1e-9
+def infer_mode(provider: Optional[str]) -> Optional[str]:
+    if not provider:
+        return None
+    return "local" if provider.lower() in LOCAL_PROVIDERS else "external_api"
 
 
-def check(doc: Any, expect: Optional[int] = None, lengths: Optional[Dict[str, int]] = None) -> Tuple[List[str], List[str]]:
-    """Returns (problems, warnings). Problems break the appendix rules; warnings deserve a look."""
-    P, W = [], []
-    if not isinstance(doc, dict):
-        return ["the file must contain one JSON object"], W
-    if doc.get("schema_version") != "1.0":
-        P.append('schema_version must be "1.0"')
-    if not str(doc.get("team_name") or "").strip():
-        P.append("team_name is empty (use --team or TEAM_NAME in .env)")
-    m = doc.get("model")
-    if not isinstance(m, dict) or m.get("mode") not in ("local", "external_api", "hybrid") or not str(m.get("name") or "").strip():
-        P.append('model must be {"mode": "local" | "external_api" | "hybrid", "name": "<model name>"}')
-    res = doc.get("results")
+def build_payload(client, group_id: str, team_name: str, mode: Optional[str] = None,
+                  model_name: Optional[str] = None, checklist_version: Optional[int] = None) -> Dict[str, Any]:
+    results, models = collect(client, group_id, checklist_version)
+    try:
+        health = client.get("/health").json()
+    except Exception:
+        health = {}
+    name = model_name or ", ".join(dict.fromkeys(models)) or health.get("llm_model")
+    mode = mode or infer_mode(health.get("llm_provider"))
+    if not name:
+        raise ExportError("Model name unknown (LLM_MODEL is not set): pass --model-name.")
+    if not mode:
+        raise ExportError("Model mode unknown (LLM_PROVIDER is not set): pass --mode local|external_api|hybrid.")
+    return {"schema_version": "1.0", "team_name": team_name, "model": {"mode": mode, "name": name},
+            "results": results}
+
+
+# ----------------------------------------------------------------- validation
+def validate_payload(p: Dict[str, Any], expected_ids: Optional[List[str]] = None,
+                     expected_count: Optional[int] = None) -> List[str]:
+    out: List[str] = []
+    if p.get("schema_version") != "1.0":
+        out.append("schema_version must be '1.0'")
+    if not str(p.get("team_name") or "").strip():
+        out.append("team_name is empty")
+    model = p.get("model") or {}
+    if model.get("mode") not in ("local", "external_api", "hybrid"):
+        out.append("model.mode must be local, external_api or hybrid")
+    if not str(model.get("name") or "").strip():
+        out.append("model.name is empty")
+    res = p.get("results")
     if not isinstance(res, list):
-        return P + ["results must be a list"], W
-    if expect is not None and len(res) != expect:
-        P.append(f"{len(res)} records, expected exactly {expect}")
-    seen = set()
-    for i, r in enumerate(res):
-        cid = r.get("conversation_id") if isinstance(r, dict) else None
-        at = f"record {i + 1} ({cid})"
-        if not isinstance(cid, str) or not cid:
-            P.append(f"{at}: conversation_id missing"); continue
-        if cid in seen:
-            P.append(f"{at}: duplicate conversation_id")
-        seen.add(cid)
-        if lengths is not None and cid not in lengths:
-            P.append(f"{at}: id is not in the dataset from the API")
-        st = r.get("status")
-        if st == "error":
+        return out + ["results must be a list"]
+    ids = [r.get("conversation_id") for r in res]
+    dup = sorted({i for i in ids if ids.count(i) > 1})
+    if dup:
+        out.append(f"duplicate conversation_id: {dup}")
+    if expected_ids is not None and sorted(ids) != sorted(expected_ids):
+        out.append(f"ids differ from the API: missing {sorted(set(expected_ids) - set(ids))}, "
+                   f"extra {sorted(set(ids) - set(expected_ids))}")
+    if expected_count is not None and len(res) != expected_count:
+        out.append(f"expected exactly {expected_count} records, got {len(res)}")
+    for r in res:
+        cid = r.get("conversation_id")
+        if r.get("status") == "error":
             if r.get("criteria") != [] or r.get("score") is not None or not str(r.get("error") or "").strip():
-                P.append(f'{at}: an error record needs criteria [], score null and a reason in "error"')
-            else:
-                W.append(f"{at}: status error: {r['error'][:120]}")
+                out.append(f"{cid}: an error record needs criteria=[], score=null and an error text")
             continue
-        if st != "ok":
-            P.append(f'{at}: status must be "ok" or "error"'); continue
-        crit = r.get("criteria")
-        if not isinstance(crit, list):
-            P.append(f"{at}: criteria must be a list"); continue
-        codes = [c.get("criterion_id") for c in crit if isinstance(c, dict)]
-        if len(codes) != len(set(codes)):
-            P.append(f"{at}: a criterion appears more than once")
-        missing = [c for c in REQUIRED if c not in codes]
-        extra = [c for c in codes if c not in REQUIRED]
-        if missing:
-            (W if extra else P).append(f"{at}: missing criteria {missing}" + (f" (the checklist has {extra} instead)" if extra else ""))
-        values = {}
+        if r.get("status") != "ok":
+            out.append(f"{cid}: status must be 'ok' or 'error'")
+            continue
+        crit = r.get("criteria") or []
+        codes = [c.get("criterion_id") for c in crit]
+        if sorted(codes) != sorted(CODES):
+            out.append(f"{cid}: criteria must be exactly {CODES}, got {codes}")
+            continue
+        vals = {c["criterion_id"]: c.get("value") for c in crit}
         for c in crit:
-            code, v = c.get("criterion_id"), c.get("value")
-            values[code] = v
-            if code in BOOL and not isinstance(v, bool):
-                P.append(f"{at}: {code} must be true or false, got {v!r}")
-            elif code in BOOL_OR_NA and not (v is None or isinstance(v, bool)):
-                P.append(f"{at}: {code} must be true, false or null, got {v!r}")
-            elif code in SCALE and not ((v is None and code in SCALE_NA) or (not isinstance(v, bool) and v in SCALE[code])):
-                P.append(f"{at}: {code} must be one of {sorted(SCALE[code])}{' or null' if code in SCALE_NA else ''}, got {v!r}")
+            code, v = c["criterion_id"], c.get("value")
+            if v is None:
+                ok = code in NULLABLE
+            elif code in BOOL_CODES:
+                ok = isinstance(v, bool)
+            else:
+                ok = isinstance(v, int) and not isinstance(v, bool) and v in SCALE_VALUES[code]
+            if not ok:
+                out.append(f"{cid}/{code}: invalid value {v!r}")
+            if not str(c.get("rationale") or "").strip():
+                out.append(f"{cid}/{code}: empty rationale")
             turns = c.get("evidence_turns")
-            if not isinstance(turns, list) or not all(isinstance(t, int) and not isinstance(t, bool) and t >= 1 for t in turns):
-                P.append(f"{at}: {code}.evidence_turns must be a list of message numbers counted from 1")
-            elif lengths and cid in lengths and any(t > lengths[cid] for t in turns):
-                P.append(f"{at}: {code}.evidence_turns {turns} go past the last message ({lengths[cid]})")
-            if not isinstance(c.get("rationale"), str):
-                P.append(f"{at}: {code}.rationale must be text")
-        sc = r.get("score")
-        if not isinstance(sc, dict):
-            P.append(f"{at}: score must be an object"); continue
-        fs = sc.get("final_score")
-        if fs is not None and (isinstance(fs, bool) or not isinstance(fs, (int, float)) or not 0 <= fs <= 100 or not _two_decimals(fs)):
-            P.append(f"{at}: final_score must be 0-100 with at most two decimals, got {fs!r}")
-        if fs is None:
-            W.append(f"{at}: final_score is null (no applicable weighted criterion)")
-        if not isinstance(sc.get("critical_flag"), bool) or ("critical" in values and sc.get("critical_flag") != values["critical"]):
-            P.append(f"{at}: critical_flag must be true/false and equal the value of criterion critical")
-    return P, W
+            if not (isinstance(turns, list) and all(isinstance(t, int) and not isinstance(t, bool) and t >= 1
+                                                    for t in turns)):
+                out.append(f"{cid}/{code}: evidence_turns must be a list of integers >= 1")
+        s = r.get("score") or {}
+        fs = s.get("final_score")
+        if not (isinstance(fs, (int, float)) and not isinstance(fs, bool) and 0 <= fs <= 100 and round(fs, 2) == fs):
+            out.append(f"{cid}: final_score must be 0..100 with at most 2 decimals, got {fs!r}")
+        if s.get("critical_flag") != vals.get("critical"):
+            out.append(f"{cid}: critical_flag must equal the 'critical' value")
+    return out
 
 
-# --------------------------------------------------------------------------- CLI
-def _report(P: List[str], W: List[str], doc: Dict[str, Any]) -> None:
-    res = doc.get("results") or []
-    ok = sum(1 for r in res if isinstance(r, dict) and r.get("status") == "ok")
-    print(f"\n{len(res)} records: {ok} ok, {len(res) - ok} error")
-    for w in W[:15]:
-        print("  warning:", w)
-    if len(W) > 15:
-        print(f"  ... {len(W) - 15} more warnings")
-    for p in P[:30]:
-        print("  PROBLEM:", p)
-    print("Format check passed." if not P else f"Format check FAILED: {len(P)} problem(s).")
-
-
-def cli() -> int:
+# ------------------------------------------------------------------------ CLI
+def main(argv: Optional[List[str]] = None, client=None) -> int:
     try:
-        sys.stdout.reconfigure(encoding="utf-8")  # Cyrillic on Windows consoles
-    except (AttributeError, ValueError):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
         pass
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--set", choices=["dev", "prod"], default="dev", help="which results file to write")
-    ap.add_argument("--group", help="dataset group_id (default DEV for --set dev; required for prod)")
-    ap.add_argument("--out", help="output path (default ../results/<set>/results.json)")
-    ap.add_argument("--team", default=os.getenv("TEAM_NAME", ""), help="team name (or TEAM_NAME in .env)")
-    ap.add_argument("--mode", choices=["local", "external_api", "hybrid"], help="model mode (default: from .env)")
+    ap = argparse.ArgumentParser(description="Export evaluations to results/<dev|prod>/results.json")
+    ap.add_argument("group_id", help="DEV or FBroker (the control set)")
+    ap.add_argument("--folder", choices=["dev", "prod"], help="default: DEV -> dev, FBroker -> prod")
+    ap.add_argument("--team-name", default=os.getenv("TEAM_NAME"), help="or set env TEAM_NAME")
+    ap.add_argument("--model-name", help="default: the model stored with the evaluations")
+    ap.add_argument("--mode", choices=["local", "external_api", "hybrid"], help="default: from LLM_PROVIDER")
     ap.add_argument("--checklist-version", type=int, help="default: the active checklist")
-    ap.add_argument("--ai-only", action="store_true", help="export AI answers without reviewer decisions")
-    ap.add_argument("--evaluate-missing", action="store_true", help="evaluate dialogues without a saved result first")
-    ap.add_argument("--expect", type=int, help="required number of records (default 65 for dev, 10 for prod)")
-    ap.add_argument("--check", metavar="FILE", help="only check an existing results.json")
-    a = ap.parse_args()
+    ap.add_argument("--base-url", default="http://127.0.0.1:8000")
+    ap.add_argument("--out", help="override the output path")
+    ap.add_argument("--force", action="store_true", help="allow exporting the SWAP set")
+    a = ap.parse_args(argv)
 
-    if a.check:
-        doc = json.loads(Path(a.check).read_text(encoding="utf-8"))
-        P, W = check(doc, a.expect)
-        _report(P, W, doc)
-        return 1 if P else 0
-
-    if a.set == "prod" and not a.group:
-        ap.error("--set prod needs --group <control group_id> from the organizers")
-    group = a.group or "DEV"
-    expect = a.expect if a.expect is not None else (65 if a.set == "dev" else 10)
-    out = Path(a.out) if a.out else ROOT / "results" / a.set / "results.json"
-
-    from dotenv import load_dotenv
-    load_dotenv(Path(__file__).resolve().parent / ".env")
-    team = a.team or os.getenv("TEAM_NAME", "")
-    try:
-        doc, lengths = asyncio.run(build(group, team, a.mode, a.checklist_version, a.ai_only, a.evaluate_missing))
-    except Exception as e:  # dataset not loadable, database problem ...
-        print(f"Could not build the results: {getattr(e, 'detail', None) or e}")
+    if a.group_id.lower() == "swap" and not a.force:
+        print("Refusing: the organizers said NOT to evaluate SWAP or add it to results/prod yet (use --force).")
         return 2
-    P, W = check(doc, expect, lengths)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"Wrote {out}")
-    _report(P, W, doc)
-    return 1 if P else 0
+    folder = a.folder or {"dev": "dev", "fbroker": "prod"}.get(a.group_id.lower())
+    if not folder:
+        print("Pass --folder dev|prod for this group.")
+        return 2
+    if not (a.team_name or "").strip():
+        print("Team name missing: pass --team-name \"...\" (or set env TEAM_NAME).")
+        return 2
+
+    own = client is None
+    client = client or httpx.Client(base_url=a.base_url, timeout=60)
+    try:
+        payload = build_payload(client, a.group_id, a.team_name.strip(), a.mode, a.model_name, a.checklist_version)
+        listing = client.get("/api/dialogues", params={"group_id": a.group_id}).json()
+        expected = [d["conversation_id"] for d in listing["dialogues"]]
+    except httpx.ConnectError:
+        print(f"Backend is not running at {a.base_url}. Start it: uvicorn main:app --port 8000")
+        return 1
+    except (ExportError, httpx.HTTPError) as exc:
+        print(f"Export failed: {exc}")
+        return 1
+    finally:
+        if own:
+            client.close()
+
+    problems = validate_payload(payload, expected_ids=expected, expected_count=10 if folder == "prod" else None)
+    if problems:
+        print("NOT WRITTEN. Problems:")
+        for p in problems:
+            print("  -", p)
+        return 1
+
+    path = Path(a.out) if a.out else REPO_ROOT / "results" / folder / "results.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    again = json.loads(path.read_text(encoding="utf-8"))  # re-read what was really written
+    if validate_payload(again, expected_ids=expected):
+        print("Written file failed re-validation, do not push it.")
+        return 1
+
+    ok = [r for r in payload["results"] if r["status"] == "ok"]
+    bad = [r for r in payload["results"] if r["status"] == "error"]
+    print(f"Wrote {path}\n  records: {len(payload['results'])}  ok: {len(ok)}  error: {len(bad)}")
+    print(f"  team: {payload['team_name']} | model: {payload['model']['name']} ({payload['model']['mode']})")
+    for r in payload["results"]:
+        if r["status"] == "ok":
+            print(f"  {r['conversation_id']:<14} {r['score']['final_score']:>6}  critical={r['score']['critical_flag']}")
+        else:
+            print(f"  {r['conversation_id']:<14} ERROR")
+    if bad:
+        print(f"\n{len(bad)} dialogue(s) not evaluated. Press 'Evaluate pending' again, then re-run this script.")
+    print("\nNext: git add results && git commit -m \"results\" && git push")
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(cli())
+    sys.exit(main())
