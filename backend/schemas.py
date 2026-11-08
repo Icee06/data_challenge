@@ -74,8 +74,3 @@ class AIResult(BaseModel):
     summary: str = ""
     detected_language: Optional[str] = None  # RU / KZ / EN / MIXED
     validation_flags: List[str] = []  # problems the AI validator fixed on its own
-
-class ChecklistSave(se.Checklist):
-    """PUT /api/checklist body: a full checklist plus an optional note for the version list."""
-
-    change_note: str = ""

@@ -1,4 +1,4 @@
-##  Freedom Broker · Conversation Quality Analytics (CQA)
+# Freedom Broker · Conversation Quality Analytics (CQA)
 
 Prototype for the Freedom Broker CQA hackathon. It scores client–operator chats and calls against an editable
 quality checklist with an LLM, shows the exact message behind every score, and lets a reviewer handle appeals.
@@ -16,8 +16,8 @@ quality checklist with an LLM, shows the exact message behind every score, and l
 
 ## Quick start
 
-Requirements: Python 3.11+ and a Gemini API key (free tier from [AI Studio](https://aistudio.google.com)),
-or a local model through Ollama.
+Requirements: Python 3.11+ and an LLM key: Gemini (free tier from [AI Studio](https://aistudio.google.com)),
+any OpenAI-compatible API such as NVIDIA NIM, or a local model through Ollama.
 
 Windows (PowerShell):
 
@@ -50,11 +50,11 @@ The backend serves the frontend, so there is nothing else to start.
 | Key | What to put |
 |---|---|
 | `ORGANIZER_API_URL` | The full GET link for DEV from the organizers. It contains `sig=`, so it is a secret. `group_id` is swapped automatically. |
-| `LLM_PROVIDER` | `gemini`, or `openai` for any OpenAI-compatible API (Ollama, Groq, OpenRouter) |
-| `LLM_API_KEY` | Your API key (not needed for Ollama) |
-| `LLM_MODEL` | e.g. `gemini-3.5-flash-lite` |
-| `LLM_RPM` | Requests per minute the client may send, e.g. `12` on the free tier |
-| `LLM_BASE_URL` | Only for `LLM_PROVIDER=openai`, e.g. `http://localhost:11434/v1/chat/completions` |
+| `LLM_PROVIDER` | `gemini`, `anthropic`, or `openai` for any OpenAI-compatible API (NVIDIA, Groq, OpenRouter, Ollama) |
+| `LLM_API_KEY` | Your API key |
+| `LLM_MODEL` | e.g. `gemini-3.5-flash-lite`, or `qwen/qwen2.5-72b-instruct` on NVIDIA |
+| `LLM_BASE_URL` | Only for `openai`: the chat-completions URL, e.g. `https://integrate.api.nvidia.com/v1/chat/completions` |
+| `LLM_TIMEOUT` | Optional, seconds per call (default 90) |
 | `TEAM_NAME` | Written into `results.json` |
 
 `.env` is in `.gitignore`. Never commit it.
@@ -97,7 +97,8 @@ pytest -q
 ```
 
 The tests use fake models and never call a real API: scoring math against hand-calculated values, every endpoint,
-appeals, checklist versions, and the AI prompt and validator.
+appeals, checklist versions, the AI prompt and validator, and `test_integration.py`, which runs the real `ai/`
+package on the backend checklist (only the LLM call is faked).
 
 ## How it is built
 
@@ -124,7 +125,8 @@ Details: [docs/architecture.md](docs/architecture.md). API reference: [backend/A
 
 ## Model and cost
 
-The default model is `gemini-3.5-flash-lite` on the Gemini API free tier. One evaluation is one LLM call for the
+The model is set in `.env`: `gemini-3.5-flash-lite` on the Gemini free tier by default, or for example
+`qwen/qwen2.5-72b-instruct` on NVIDIA NIM. One evaluation is one LLM call for the
 whole checklist, plus a retry only when the answer fails validation. Token counts are available at `/api/usage`;
 the cost estimate is in [docs/cost.md](docs/cost.md).
 

@@ -38,10 +38,41 @@ def _default_evaluator() -> Evaluator:
     return evaluate_dialogue
 
 
+def _plain(x: Any) -> Any:
+    return int(x) if float(x).is_integer() else float(x)
+
+
 def checklist_for_ai(cl: se.Checklist) -> Dict[str, Any]:
-    """Checklist object -> dict for the AI package. The full model dump carries id, name, type,
-    weight, allow_na, scale, description and na_condition, so the prompt can be built from it."""
-    return cl.model_dump()
+    """Backend checklist -> the format ai/prompt.py and ai/validator.py read (same shape as ai/checklist.json):
+
+        criteria: [{id, name, description, weight, type: "binary" | "scale",
+                    scale: [0, 5, 10, ...], scale_steps: {"10": "what earns 10"}, na_condition: text | None}]
+        critical_error: {description}
+
+    The gross-error criterion (type "flag") is not a scored criterion for the AI: it becomes `critical_error`,
+    and the AI answers it through critical_error / critical_error_evidence. The ids are the backend ids, so the
+    AI answers with exactly the ids of the active checklist (a replaced criterion needs no code change)."""
+    criteria, flags = [], []
+    for c in cl.criteria:
+        if c.type == "flag":
+            flags.append(f"{c.name}: {c.description}".strip(": "))
+            continue
+        item: Dict[str, Any] = {
+            "id": c.id, "name": c.name, "description": c.description or c.name,
+            "weight": _plain(c.weight), "type": "scale" if c.type == "scale" else "binary",
+            # the AI validator allows N/A exactly when na_condition is set
+            "na_condition": (c.na_condition.strip() or "The criterion does not apply to this conversation.")
+            if c.allow_na else None,
+        }
+        if c.type == "scale":
+            steps = sorted(c.scale, key=lambda s: s.score)
+            item["scale"] = [_plain(s.score) for s in steps]
+            item["scale_steps"] = {str(_plain(s.score)): s.description for s in steps if s.description}
+        criteria.append(item)
+    out: Dict[str, Any] = {"version": cl.id, "criteria": criteria, "notes": list(cl.notes)}
+    if flags:
+        out["critical_error"] = {"description": " ".join(flags)}
+    return out
 
 
 # ------------------------------------------------------------- AI -> answers

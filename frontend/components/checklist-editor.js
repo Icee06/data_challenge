@@ -62,6 +62,7 @@ async function saveChecklist() {
     if (c.type === "scale" && new Set(c.scale).size < 2) return err.textContent = `“${n}”: a scale needs at least two different steps.`;
     if (c.type === "scale" && c.scale.some(s => !c.scaleDesc?.[s]?.trim())) return err.textContent = `“${n}”: describe what earns each scale step.`;
     if (c.allowNA && !c.naRule.trim()) return err.textContent = `“${n}”: write the N/A condition or untick “N/A allowed”.`;
+    if (!c.flag && !(Number(c.weight) > 0)) return err.textContent = `“${n}”: give it a weight above 0, or mark it as a gross-error flag.`;
   }
   if (!state.draft.some(c => !c.flag && c.weight > 0)) return err.textContent = "At least one scored criterion with a weight is required.";
   state.draft.forEach(c => {

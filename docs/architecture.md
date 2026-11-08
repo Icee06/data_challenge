@@ -74,7 +74,9 @@ total 50.5 ÷ 65 × 100 = **77.69**. A reviewer changes closing to Yes: 55.5 ÷ 
 
 ## AI contract
 
-What `evaluate_dialogue()` returns (`schemas.AIResult`):
+`evaluation_service.checklist_for_ai()` turns the active checklist into the format the `ai/` package reads
+(the shape of `ai/checklist.json`: `binary` / `scale` criteria with a plain list of scale steps, and the gross-error
+criterion as `critical_error`). What `evaluate_dialogue()` returns (`schemas.AIResult`):
 
 ```json
 {

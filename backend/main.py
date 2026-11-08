@@ -137,10 +137,21 @@ def _save_disk_cache(group_id: str, records: list[dict]) -> None:
 
 
 def _load_disk_cache(group_id: str) -> Optional[list[dict]]:
+    """Reads data/<group_id>.json in any shape we may find there: the records list this server writes,
+    or the raw organizer response saved with curl ({"isSuccess", "data": {"records": [...]}}).
+    PowerShell's '>' writes UTF-16, so that encoding is accepted too."""
     try:
-        return json.loads(_cache_file(group_id).read_text(encoding="utf-8"))
+        raw = _cache_file(group_id).read_bytes()
+        text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
+        data = json.loads(text)
     except (OSError, ValueError):
         return None
+    if isinstance(data, dict):
+        inner = data.get("data") if isinstance(data.get("data"), dict) else data
+        data = inner.get("records")
+    if not isinstance(data, list):
+        return None
+    return [r for r in data if isinstance(r, dict)]
 
 
 async def ensure_loaded(group_id: str, refresh: bool = False) -> str:

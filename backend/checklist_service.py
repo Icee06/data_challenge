@@ -56,6 +56,10 @@ def save_new_version(cl: se.Checklist, note: str = "") -> Dict[str, Any]:
         c.name = c.name.strip()
     if not any(c.type != "flag" and c.weight > 0 for c in cl.criteria):
         raise ServiceError(422, "At least one non-flag criterion must have a weight above 0.")
+    unweighted = [c.name or c.id for c in cl.criteria if c.type != "flag" and c.weight <= 0]
+    if unweighted:  # a scored criterion worth 0 points makes no sense and breaks the AI validator
+        raise ServiceError(422, "Give these criteria a weight above 0 (or mark them as a gross-error flag): "
+                                + ", ".join(unweighted))
     version = db.insert_checklist(cl.name, cl.model_dump(), note=note, activate=True)
     return {"version": version, "is_active": True, "weights_total": cl.weights_total, "warnings": warnings_for(cl),
             "checklist": cl.model_dump()}

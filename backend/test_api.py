@@ -72,7 +72,7 @@ def fake_generic(dialogue, checklist):
     for c in checklist["criteria"]:
         if c["type"] == "flag":
             continue
-        score = max(s["score"] for s in c["scale"]) if c["type"] == "scale" else None
+        score = max(s["score"] if isinstance(s, dict) else s for s in c["scale"]) if c["type"] == "scale" else None
         crit.append({"criterion_id": c["id"], "status": "PASS", "score": score, "evidence": None, "reason": "fine"})
     return {"criteria": crit, "critical_error": False, "critical_error_evidence": [], "summary": "generic"}
 
