@@ -1,4 +1,5 @@
-# Freedom Broker · Conversation Quality Analytics (CQA)
+# Freedom Broker · Conversation Quality Analytics (CQA) 
+# Team Name: Alty-Zheti
 
 Prototype for the Freedom Broker CQA hackathon. It scores client–operator chats and calls against an editable
 quality checklist with an LLM, shows the exact message behind every score, and lets a reviewer handle appeals.
